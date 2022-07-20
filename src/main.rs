@@ -25,6 +25,49 @@ pub fn is_brace(c: char) -> bool {
     c == '(' || c == ')'
 }
 
+pub fn parse(src: &str) -> Expr {
+    let mut tokens = Tokenizer::new(src);
+    tokens.next();
+    parse_exp(&mut tokens)
+}
+
+#[derive(Debug)]
+pub enum Expr {
+    E(Vec<Expr>),
+    V(i32),
+    S(String),
+}
+
+pub fn eval(e: &Expr) -> i32 {
+    match e {
+        Expr::E(vals) => match &vals[0] {
+            Expr::S(op) => match op.as_str() {
+                "+" => eval(&vals[1]) + eval(&vals[2]),
+                "*" => eval(&vals[1]) * eval(&vals[2]),
+                "-" => eval(&vals[1]) - eval(&vals[2]),
+                "☹️" => eval(&vals[1]) * 100,
+                _ => panic!("Unknown op"),
+            },
+            _ => panic!("First thing must be op"),
+        },
+        Expr::V(val) => *val,
+        Expr::S(val) => val.parse::<i32>().unwrap(),
+    }
+}
+
+pub fn parse_exp(tokens: &mut Tokenizer) -> Expr {
+    let mut e: Vec<Expr> = Default::default();
+    loop {
+        let token = tokens.next().unwrap().to_owned();
+
+        match token.as_str() {
+            "(" => e.push(parse_exp(tokens)),
+            ")" => return Expr::E(e),
+            _ => e.push(Expr::S(token)),
+        }
+    }
+}
+
 impl<'a> Iterator for Tokenizer<'a> {
     type Item = &'a str;
 
@@ -69,14 +112,16 @@ impl<'a> Iterator for Tokenizer<'a> {
 
 #[cfg(test)]
 mod tests {
-    use crate::Tokenizer;
+    use crate::{eval, parse, Tokenizer};
 
     #[test]
     fn test_tokenize() {
         let test = "(☹️️)";
-        let parse = vec!["(", "☹️️", ")"];
+        let parse_test = vec!["(", "☹️️", ")"];
         assert!(Tokenizer::new(test)
-            .zip(parse.iter())
+            .zip(parse_test.iter())
             .all(|(a, b)| (&a).eq(b)));
+
+        println!("{:?}", eval(&parse("(☹️(- (+ (* 3 2) (* 2 2)) 1))")));
     }
 }
