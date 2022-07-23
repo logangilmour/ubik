@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     iter::Peekable,
     str::{from_utf8_unchecked, CharIndices},
 };
@@ -25,10 +26,19 @@ pub fn is_brace(c: char) -> bool {
     c == '(' || c == ')'
 }
 
-pub fn parse(src: &str) -> Expr {
+#[derive(Debug)]
+pub struct Type {
+    size: usize,
+    alignment: usize,
+    elements: usize,
+}
+
+pub fn parse(src: &str) -> (Vec<u8>, Vec<Type>) {
     let mut tokens = Tokenizer::new(src);
-    tokens.next();
-    parse_exp(&mut tokens)
+    let mut types = vec![];
+    let mut data = vec![];
+    parse_exp(&mut tokens, &mut data, &mut types);
+    (data, types)
 }
 
 #[derive(Debug)]
@@ -38,34 +48,95 @@ pub enum Expr {
     S(String),
 }
 
-pub fn eval(e: &Expr) -> i32 {
-    match e {
-        Expr::E(vals) => match &vals[0] {
-            Expr::S(op) => match op.as_str() {
-                "+" => eval(&vals[1]) + eval(&vals[2]),
-                "*" => eval(&vals[1]) * eval(&vals[2]),
-                "-" => eval(&vals[1]) - eval(&vals[2]),
-                "☹️" => eval(&vals[1]) * 100,
-                _ => panic!("Unknown op"),
-            },
-            _ => panic!("First thing must be op"),
-        },
-        Expr::V(val) => *val,
-        Expr::S(val) => val.parse::<i32>().unwrap(),
-    }
-}
+pub fn eval(data: &[u8], types: &[Type]) -> i32 {
+    let mut intermediates = vec![];
+    let mut offset = 0;
+    let mut evaluating: Vec<(usize, usize)> = vec![];
 
-pub fn parse_exp(tokens: &mut Tokenizer) -> Expr {
-    let mut e: Vec<Expr> = Default::default();
-    loop {
-        let token = tokens.next().unwrap().to_owned();
+    let symbols: HashMap<String, i32> = [("+".to_owned(), 0), ("-".to_owned(), 1)]
+        .into_iter()
+        .collect();
 
-        match token.as_str() {
-            "(" => e.push(parse_exp(tokens)),
-            ")" => return Expr::E(e),
-            _ => e.push(Expr::S(token)),
+    for (i, t) in types.iter().enumerate() {
+        if t.elements == 0 {
+            let s = unsafe { from_utf8_unchecked(&data[offset..offset + t.size]) };
+            offset += t.size;
+            if let Ok(num) = s.parse::<i32>() {
+                intermediates.push(num);
+            } else {
+                intermediates.push(symbols[s]);
+            }
+            evaluating.last_mut().unwrap().1 += 1;
+        } else {
+            evaluating.push((i, 0));
+        }
+        while let Some(ev) = evaluating.last() {
+            if types[ev.0].elements == ev.1 {
+                assert!(ev.1 == 3, "Wrong number of args for fn");
+                let args = (
+                    intermediates.pop().unwrap(),
+                    intermediates.pop().unwrap(),
+                    intermediates.pop().unwrap(),
+                );
+                intermediates.push(match args.2 {
+                    0 => args.1 + args.0,
+                    1 => args.1 - args.0,
+                    _ => panic!("Unknown op"),
+                });
+                evaluating.pop();
+                if let Some(parent) = evaluating.last_mut() {
+                    parent.1 += 1;
+                }
+            } else {
+                break;
+            }
         }
     }
+    intermediates.pop().unwrap()
+}
+
+pub fn parse_exp(tokens: &mut Tokenizer, data: &mut Vec<u8>, types: &mut Vec<Type>) {
+    let mut building_types: Vec<usize> = vec![];
+    for token in tokens.by_ref() {
+        println!("Parsing: {}", token);
+        match token {
+            "(" => {
+                building_types.push(types.len());
+                types.push(Type {
+                    size: 0,
+                    alignment: 1,
+                    elements: 0,
+                });
+            }
+            ")" => {
+                let finished_type_idx = building_types.pop().unwrap();
+
+                if let Some(bt) = building_types.last() {
+                    println!("FINALIZING");
+                    types[*bt].elements += 1;
+                    types[*bt].size += types[finished_type_idx].size;
+                    types[*bt].alignment =
+                        types[*bt].alignment.max(types[finished_type_idx].alignment);
+                }
+            }
+            s => {
+                let bytes = s.as_bytes();
+                data.extend(bytes);
+                let finished_type = Type {
+                    elements: 0,
+                    size: bytes.len(),
+                    alignment: 1,
+                };
+                if let Some(bt) = building_types.last() {
+                    types[*bt].elements += 1;
+                    types[*bt].size += finished_type.size;
+                    types[*bt].alignment = types[*bt].alignment.max(finished_type.alignment);
+                }
+                types.push(finished_type);
+            }
+        }
+    }
+    assert!(building_types.is_empty());
 }
 
 impl<'a> Iterator for Tokenizer<'a> {
@@ -122,6 +193,7 @@ mod tests {
             .zip(parse_test.iter())
             .all(|(a, b)| (&a).eq(b)));
 
-        println!("{:?}", eval(&parse("(☹️(- (+ (* 3 2) (* 2 2)) 1))")));
+        let (data, types) = parse("(- (- 2 3) 1)");
+        println!("{:?}", eval(&data, &types));
     }
 }
