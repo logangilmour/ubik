@@ -31,9 +31,9 @@ checksum = "349d5a591cd28b49e1d1037471617a32ddcda5731b99419008085f72d5a53836"
 
 [[package]]
 name = "llvm-sys"
-version = "90.2.1"
+version = "140.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5fe45e64c8db814191fedc1787c3fb8eb2e2c8af897727b3e21df2562c4a01c"
+checksum = "5a4ad24a72823cb06764e04a008d4aedc1be56d2be87aa4212b12a3e9f77bb10"
 dependencies = [
  "cc",
  "lazy_static",
@@ -67,18 +67,9 @@ checksum = "a3f87b73ce11b1619a3c6332f45341e0047173771e8b8b73f87bfeefb7b56244"
 
 [[package]]
 name = "semver"
-version = "0.9.0"
+version = "1.0.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d7eb9ef2c18661902cc47e535f9bc51b78acd254da71d375c2f6720d9a40403"
-dependencies = [
- "semver-parser",
-]
-
-[[package]]
-name = "semver-parser"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "388a1df253eca08550bef6c72392cfe7c30914bf41df5269b68cbd6ff8f570a3"
+checksum = "a2333e6df6d6598f2b1974829f853c2b4c5f4a6e503c10af918081aa6f8564e1"
 
 [[package]]
 name = "ubik"
