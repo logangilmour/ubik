@@ -1,1 +1,6 @@
 /target
+*.ll
+*.native
+*.s
+*.o
+*.wasm

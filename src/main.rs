@@ -4,6 +4,8 @@ use std::{
     str::{from_utf8_unchecked, CharIndices},
 };
 
+extern crate llvm_sys;
+
 fn main() {
     println!("Hello, world!");
 }
@@ -26,22 +28,15 @@ pub fn is_brace(c: char) -> bool {
     c == '(' || c == ')' || c == '{' || c == '}'
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum Kind {
-    Expr,
-    Macro,
-    Atom,
-}
-
 #[derive(Debug)]
-pub struct Type {
-    kind: Kind,
-    size: usize,
-    alignment: usize,
-    elements: usize,
-    total_elements: usize,
+pub enum Expr {
+    Parse(Vec<Expr>),
+    List(Vec<Expr>),
+    Symbol(String),
+    Number(i32),
 }
 
+/*
 pub fn eval(data: &[u8], types: &[Type]) -> i32 {
     let mut intermediates = vec![];
     let mut offset = 0;
@@ -88,8 +83,34 @@ pub fn eval(data: &[u8], types: &[Type]) -> i32 {
     }
     intermediates.pop().unwrap()
 }
+*/
 
-pub fn parse(src: &str) -> (Vec<u8>, Vec<Type>, Vec<usize>) {
+pub fn parse_exp(tokens: &mut Tokenizer) -> Expr {
+    let mut items: Vec<Expr> = vec![];
+    while let Some(token) = tokens.next() {
+        match token {
+            "(" | "{" => {
+                let sub_expr = parse_exp(tokens);
+                assert!(!matches!(sub_expr, Expr::Parse(_)), "Uh oh");
+                items.push(sub_expr);
+            }
+            ")" | "}" => {
+                return Expr::List(items);
+            }
+            s => {
+                if s.chars().next().unwrap().is_numeric() {
+                    items.push(Expr::Number(s.parse().expect("Bad number")));
+                } else {
+                    items.push(Expr::Symbol(s.to_owned()));
+                }
+            }
+        }
+    }
+    Expr::Parse(items)
+}
+
+/*
+pub fn parse(src: &str) -> Expr {
     let mut tokens = Tokenizer::new(src);
     let mut types = vec![];
     let mut data = vec![];
@@ -132,6 +153,7 @@ pub fn parse(src: &str) -> (Vec<u8>, Vec<Type>, Vec<usize>) {
                 );
             }
             s => {
+                if s.chars().next().unwrap().is_numeric() {}
                 let bytes = s.as_bytes();
                 data.extend(bytes);
                 let finished_type = Type {
@@ -234,6 +256,7 @@ pub fn parse(src: &str) -> (Vec<u8>, Vec<Type>, Vec<usize>) {
     */
     (data, types, offsets)
 }
+*/
 
 impl<'a> Iterator for Tokenizer<'a> {
     type Item = &'a str;
@@ -279,9 +302,11 @@ impl<'a> Iterator for Tokenizer<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::ptr;
     use std::str::from_utf8;
 
-    use crate::{eval, parse, Tokenizer};
+    use crate::parse_exp;
+    use crate::Tokenizer;
 
     #[test]
     fn test_tokenize() {
@@ -291,12 +316,84 @@ mod tests {
             .zip(parse_test.iter())
             .all(|(a, b)| (&a).eq(b)));
 
-        let (data, types, child_offsets) =
-            parse("{fn add (a int b int) int (+ a b)}
-            {fn main (args vec) void {print (add 4 5)}}");
-        println!("{:?}", types);
-        println!("{:?}", child_offsets);
-        println!("{}", from_utf8(&data).unwrap())
+        println!(
+            "{:?}",
+            parse_exp(&mut Tokenizer::new(
+                "{fn add (a int b int) int (+ a b)}
+        {fn main (args vec) void {print (add 4 5)}}"
+            ))
+        );
+
         //println!("{:?}", eval(&data, &types));
+    }
+
+    #[derive(Debug)]
+    struct Test {
+        vec: Vec<i32>,
+        other: Vec<i32>,
+    }
+
+    impl Test {
+        pub fn Log(&self) {
+            println!("{:?}", self);
+        }
+    }
+
+    macro_rules! c_str {
+        ($s:expr) => {
+            concat!($s, "\0").as_ptr() as *const i8
+        };
+    }
+
+    use llvm_sys::bit_writer::*;
+    use llvm_sys::core::*;
+    use llvm_sys::prelude::LLVMBool;
+
+    #[test]
+    fn test_llvm() {
+        unsafe {
+            let context = LLVMContextCreate();
+            let module = LLVMModuleCreateWithNameInContext(c_str!("hello"), context);
+            let builder = LLVMCreateBuilderInContext(context);
+
+            // types
+            let int_8_type = LLVMInt8TypeInContext(context);
+            let int_8_type_ptr = LLVMPointerType(int_8_type, 0);
+            let int_32_type = LLVMInt32TypeInContext(context);
+
+            // puts function
+            let puts_function_args_type = [int_8_type_ptr].as_ptr() as *mut _;
+
+            let puts_function_type = LLVMFunctionType(int_32_type, puts_function_args_type, 1, 0);
+            let puts_function = LLVMAddFunction(module, c_str!("puts"), puts_function_type);
+            // end
+
+            // main function
+            let main_function_type = LLVMFunctionType(int_32_type, ptr::null_mut(), 0, 0);
+            let main_function = LLVMAddFunction(module, c_str!("main"), main_function_type);
+
+            let entry = LLVMAppendBasicBlockInContext(context, main_function, c_str!("entry"));
+            LLVMPositionBuilderAtEnd(builder, entry);
+
+            let puts_function_args = [LLVMBuildPointerCast(
+                builder, // cast [14 x i8] type to int8 pointer
+                LLVMBuildGlobalString(builder, c_str!("Hello, World!"), c_str!("hello")), // build hello string constant
+                int_8_type_ptr,
+                c_str!("0"),
+            )]
+            .as_ptr() as *mut _;
+
+            LLVMBuildCall(builder, puts_function, puts_function_args, 1, c_str!("i"));
+            LLVMBuildRet(builder, LLVMConstInt(int_32_type, 0, 0));
+            // end
+
+            //LLVMDumpModule(module); // dump module to STDOUT
+            LLVMPrintModuleToFile(module, c_str!("hello.ll"), ptr::null_mut());
+
+            // clean memory
+            LLVMDisposeBuilder(builder);
+            LLVMDisposeModule(module);
+            LLVMContextDispose(context);
+        }
     }
 }
