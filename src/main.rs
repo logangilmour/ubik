@@ -36,16 +36,16 @@ pub enum Expr {
     Number(i32),
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct Env<'a> {
     parent: Option<&'a Env<'a>>,
     symbols: HashMap<String, Expr>,
 }
 
 impl<'a> Env<'a> {
-    fn store(&mut self, symbol: &'a Expr, value: &'a Expr) {
+    fn store(&mut self, symbol: &'a Expr, value: Expr) {
         if let Expr::Symbol(name) = symbol {
-            self.symbols.insert(name.clone(), value.clone());
+            self.symbols.insert(name.clone(), value);
         } else {
             panic!("Name must be symbol.")
         }
@@ -68,10 +68,18 @@ impl<'a> Env<'a> {
 
 pub fn eval(expr: Expr) {
     if let Expr::Parse(exprs) = expr {
-        let mut symbols = Default::default();
+        let mut symbols: Env = Default::default();
 
         for expr in &exprs {
-            println!("Output: {}", eval_recursive(expr, &mut symbols));
+            if let Expr::List(exprs) = expr {
+                if let Expr::Symbol(name) = &exprs[0] {
+                    if name.as_str() == "fn" {
+                        symbols.store(&exprs[1], Expr::List(exprs[2..].to_vec()));
+                        continue;
+                    }
+                }
+            }
+            println!("Output: {}", eval_recursive(expr, &symbols));
         }
     }
 }
@@ -80,78 +88,55 @@ pub fn eval_recursive<'a>(expr: &'a Expr, env: &Env) -> i32 {
         Expr::List(exprs) => {
             if let Expr::Symbol(name) = &exprs[0] {
                 match name.as_str() {
-                    /*
-                    "fn" => {
-                        if let Expr::Symbol(name) = &exprs[1] {
-                            symbols.entry(name).or_default().push(expr);
-                            return 0;
-                        } else {
-                            panic!("Must have name!")
-                        }
-                    }
-                    */
                     "+" => return eval_recursive(&exprs[1], env) + eval_recursive(&exprs[2], env),
                     "-" => return eval_recursive(&exprs[1], env) - eval_recursive(&exprs[2], env),
                     "*" => return eval_recursive(&exprs[1], env) * eval_recursive(&exprs[2], env),
-                    other => {
-                        /*
-                        let v = env.load(&exprs[0]);
+                    _ => match env.load(&exprs[0]) {
+                        Expr::List(fun) => {
+                            if let Expr::List(params) = &fun[0] {
+                                println!("Executing: {:?}", fun);
 
-                        if let Some(stored) = symbols.get(other) {
-                            if let Some(Expr::Number(val)) = v {
-                                return *val;
-                            } else if let Some(Expr::List(stored_exprs)) = stored.last() {
-                                if let Expr::Symbol(name) = &stored_exprs[0] {
-                                    match name.as_str() {
-                                        "fn" => {
-                                            if let Expr::List(params) = &stored_exprs[2] {
-                                                assert!(
-                                                    params.len() == exprs.len() - 1,
-                                                    "Fn must have correct number of args"
-                                                );
-                                                for param in params {
-                                                    if let Expr::Symbol(name) = param {
-                                                        symbols
-                                                            .entry(name)
-                                                            .or_default()
-                                                            .push(&Number(eval()))
-                                                    } else {
-                                                        panic!("parameter def must be symbols")
-                                                    }
-                                                }
-                                            } else {
-                                                panic!("Must provide args")
-                                            }
-                                        }
-                                        _ => panic!("Only valid stored expr is a fn!"),
-                                    }
+                                let mut fnenv = Env {
+                                    parent: Some(env),
+                                    ..Default::default()
+                                };
+                                assert!(
+                                    params.len() == exprs.len() - 1,
+                                    "Must have right number of args"
+                                );
+                                for (idx, param) in params.iter().enumerate() {
+                                    assert!(matches!(param, Expr::Symbol(_)));
+
+                                    fnenv.store(
+                                        param,
+                                        Expr::Number(eval_recursive(&exprs[idx + 1], env)),
+                                    );
                                 }
-                            } else {
-                                panic!("WTF")
+                                let mut ret = 0;
+                                for fnexpr in &fun[1..] {
+                                    ret = eval_recursive(fnexpr, &fnenv);
+                                }
+                                return ret;
                             }
-                        } else {
-                            panic!("unkown symbol!")
                         }
-                        */
-                    }
+                        Expr::Number(val) => {
+                            println!("GOT HERE!");
+                            return val;
+                        }
+                        _ => panic!("How'd that get in the symbol table?"),
+                    },
                 }
             }
             panic!("Not sure whats going on")
         }
         Expr::Number(val) => *val,
-        Expr::Symbol(name) => {
-            /*
-            env.load(expr) {
-                if let Some(Expr::Number(val)) = defs.last() {
-                    *val
-                } else {
-                    panic!("Not a number!")
-                }
+        Expr::Symbol(_) => {
+            let val = env.load(expr);
+            if let Expr::Number(val) = val {
+                val
             } else {
-                panic!("No such symbol!")
+                panic!("")
             }
-            */
-            0
         }
         Expr::Parse(_) => panic!("Shouldn't get here"),
     }
@@ -440,7 +425,11 @@ mod tests {
 
         println!(
             "{:?}",
-            eval(parse_exp(&mut Tokenizer::new("(+ 1 2) (+ 2 3)")))
+            eval(parse_exp(&mut Tokenizer::new(
+                "(fn add (a b) (+ a b))
+                (fn add_twice (a b) (add a (add a b)))
+                (add_twice 2 3)"
+            )))
         );
 
         //println!("{:?}", eval(&data, &types));
