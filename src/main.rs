@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
+    fmt::{self, Display},
     iter::Peekable,
     str::{from_utf8_unchecked, CharIndices},
 };
@@ -34,6 +35,15 @@ pub enum Expr {
     List(Vec<Expr>),
     Symbol(String),
     Number(i32),
+}
+
+impl Expr {
+    pub fn num(&self) -> i32 {
+        if let Expr::Number(n) = self {
+            return *n;
+        }
+        panic!("Must be a number!")
+    }
 }
 
 #[derive(Default, Debug)]
@@ -79,31 +89,55 @@ pub fn eval(expr: Expr) {
                     }
                 }
             }
-            println!("Output: {}", eval_recursive(expr, &mut symbols));
+            println!("Output: {:?}", eval_recursive(expr, &mut symbols));
         }
     }
 }
 
-pub fn eval_recursive(expr: &Expr, env: &mut Env) -> i32 {
+pub fn eval_recursive(expr: &Expr, env: &mut Env) -> Expr {
     match expr {
         Expr::List(exprs) => {
             if let Expr::Symbol(name) = &exprs[0] {
                 match name.as_str() {
                     "set" => {
-                        let val = Expr::Number(eval_recursive(&exprs[2], env));
+                        let val = eval_recursive(&exprs[2], env);
                         env.store(exprs[1].clone(), val);
-                        return 0;
+                        return Expr::List(vec![]);
                     }
                     "=" => {
-                        return (eval_recursive(&exprs[1], env) == eval_recursive(&exprs[2], env))
-                            as i32
+                        return Expr::Number(
+                            (eval_recursive(&exprs[1], env).num()
+                                == eval_recursive(&exprs[2], env).num())
+                                as i32,
+                        )
                     }
-                    "+" => return eval_recursive(&exprs[1], env) + eval_recursive(&exprs[2], env),
-                    "-" => return eval_recursive(&exprs[1], env) - eval_recursive(&exprs[2], env),
-                    "*" => return eval_recursive(&exprs[1], env) * eval_recursive(&exprs[2], env),
+                    "print" => {
+                        for expr in &exprs[1..] {
+                            println!("PRINT: {:?}", eval_recursive(expr, env));
+                        }
+                        return Expr::List(vec![]);
+                    }
+                    "+" => {
+                        return Expr::Number(
+                            eval_recursive(&exprs[1], env).num()
+                                + eval_recursive(&exprs[2], env).num(),
+                        )
+                    }
+                    "-" => {
+                        return Expr::Number(
+                            eval_recursive(&exprs[1], env).num()
+                                - eval_recursive(&exprs[2], env).num(),
+                        )
+                    }
+                    "*" => {
+                        return Expr::Number(
+                            eval_recursive(&exprs[1], env).num()
+                                * eval_recursive(&exprs[2], env).num(),
+                        )
+                    }
                     "if" => {
                         let mut clause_index = None;
-                        let mut last_evaluated = 0;
+                        let mut last_evaluated = Expr::Number(0);
                         for (idx, name) in exprs.iter().enumerate().filter_map(|(idx, expr)| {
                             if let Expr::Symbol(name) = expr {
                                 if name == "elseif" || name == "else" || name == "if" {
@@ -118,7 +152,7 @@ pub fn eval_recursive(expr: &Expr, env: &mut Env) -> i32 {
                             match name.as_str() {
                                 "if" | "elseif" => {
                                     assert!(idx + 1 < exprs.len());
-                                    if eval_recursive(&exprs[idx + 1], env) != 0 {
+                                    if eval_recursive(&exprs[idx + 1], env).num() != 0 {
                                         clause_index = Some(idx + 2);
                                         break;
                                     }
@@ -160,10 +194,10 @@ pub fn eval_recursive(expr: &Expr, env: &mut Env) -> i32 {
                                 );
                                 for (idx, param) in params.iter().enumerate() {
                                     assert!(matches!(param, Expr::Symbol(_)));
-                                    let val = Expr::Number(eval_recursive(&exprs[idx + 1], env));
+                                    let val = eval_recursive(&exprs[idx + 1], env);
                                     fnenv.store(param.clone(), val);
                                 }
-                                let mut ret = 0;
+                                let mut ret = Expr::List(vec![]);
                                 fnenv.parent = Some(env);
                                 for fnexpr in &fun[1..] {
                                     ret = eval_recursive(fnexpr, &mut fnenv);
@@ -171,25 +205,15 @@ pub fn eval_recursive(expr: &Expr, env: &mut Env) -> i32 {
                                 return ret;
                             }
                         }
-                        Expr::Number(val) => {
-                            println!("GOT HERE!");
-                            return val;
-                        }
+                        Expr::Number(val) => return Expr::Number(val),
                         _ => panic!("How'd that get in the symbol table?"),
                     },
                 }
             }
             panic!("Not sure whats going on")
         }
-        Expr::Number(val) => *val,
-        Expr::Symbol(_) => {
-            let val = env.load(expr);
-            if let Expr::Number(val) = val {
-                val
-            } else {
-                panic!("")
-            }
-        }
+        Expr::Number(_) => expr.clone(),
+        Expr::Symbol(_) => env.load(expr),
         Expr::Parse(_) => panic!("Shouldn't get here"),
     }
 }
@@ -487,6 +511,18 @@ mod tests {
                         test
                         (+ a b))
                 }
+
+                {fn pow (a b)
+                    (print a b)
+                    {if (= b 1)
+                        a
+                    else
+                        (* a (pow a (- b 1)))
+                    }
+                }
+
+                (pow 2 5)
+
                 {set threshold 48}
                 {if (= (add_twice 2 3) threshold)
                     11 
