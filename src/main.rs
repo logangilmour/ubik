@@ -43,7 +43,7 @@ pub struct Env<'a> {
 }
 
 impl<'a> Env<'a> {
-    fn store(&mut self, symbol: &'a Expr, value: Expr) {
+    fn store(&mut self, symbol: Expr, value: Expr) {
         if let Expr::Symbol(name) = symbol {
             self.symbols.insert(name.clone(), value);
         } else {
@@ -74,21 +74,26 @@ pub fn eval(expr: Expr) {
             if let Expr::List(exprs) = expr {
                 if let Expr::Symbol(name) = &exprs[0] {
                     if name.as_str() == "fn" {
-                        symbols.store(&exprs[1], Expr::List(exprs[2..].to_vec()));
+                        symbols.store(exprs[1].clone(), Expr::List(exprs[2..].to_vec()));
                         continue;
                     }
                 }
             }
-            println!("Output: {}", eval_recursive(expr, &symbols));
+            println!("Output: {}", eval_recursive(expr, &mut symbols));
         }
     }
 }
 
-pub fn eval_recursive<'a>(expr: &'a Expr, env: &Env) -> i32 {
+pub fn eval_recursive(expr: &Expr, env: &mut Env) -> i32 {
     match expr {
         Expr::List(exprs) => {
             if let Expr::Symbol(name) = &exprs[0] {
                 match name.as_str() {
+                    "set" => {
+                        let val = Expr::Number(eval_recursive(&exprs[2], env));
+                        env.store(exprs[1].clone(), val);
+                        return 0;
+                    }
                     "=" => {
                         return (eval_recursive(&exprs[1], env) == eval_recursive(&exprs[2], env))
                             as i32
@@ -146,7 +151,7 @@ pub fn eval_recursive<'a>(expr: &'a Expr, env: &Env) -> i32 {
                                 println!("Executing: {:?}", fun);
 
                                 let mut fnenv = Env {
-                                    parent: Some(env),
+                                    parent: None,
                                     ..Default::default()
                                 };
                                 assert!(
@@ -155,15 +160,13 @@ pub fn eval_recursive<'a>(expr: &'a Expr, env: &Env) -> i32 {
                                 );
                                 for (idx, param) in params.iter().enumerate() {
                                     assert!(matches!(param, Expr::Symbol(_)));
-
-                                    fnenv.store(
-                                        param,
-                                        Expr::Number(eval_recursive(&exprs[idx + 1], env)),
-                                    );
+                                    let val = Expr::Number(eval_recursive(&exprs[idx + 1], env));
+                                    fnenv.store(param.clone(), val);
                                 }
                                 let mut ret = 0;
+                                fnenv.parent = Some(env);
                                 for fnexpr in &fun[1..] {
-                                    ret = eval_recursive(fnexpr, &fnenv);
+                                    ret = eval_recursive(fnexpr, &mut fnenv);
                                 }
                                 return ret;
                             }
@@ -479,19 +482,23 @@ mod tests {
                      (+ a b)
                 }
                 {fn add_twice (a b) 
+                    {set test 44}
                     (add 
-                        a 
+                        test
                         (+ a b))
                 }
-
-                {if (= (add_twice 2 3) 4)
+                {set threshold 48}
+                {if (= (add_twice 2 3) threshold)
                     11 
                 elseif (= (add_twice 2 3) 5)
                     
                     12 
                 else 
                     2
-                }"
+                }
+                
+                threshold
+                "
             )))
         );
 
