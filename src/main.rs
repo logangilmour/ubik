@@ -46,6 +46,30 @@ impl Expr {
     }
 }
 
+impl fmt::Display for Expr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Expr::Parse(a) | Expr::List(a) => {
+                write!(f, "(").unwrap();
+                for (idx, child) in a.iter().enumerate() {
+                    child.fmt(f).unwrap();
+                    if idx != a.len() - 1 {
+                        write!(f, " ").unwrap();
+                    }
+                }
+                write!(f, ")").unwrap();
+            }
+            Expr::Number(n) => {
+                write!(f, "{}", n).unwrap();
+            }
+            Expr::Symbol(s) => {
+                write!(f, "{}", s).unwrap();
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Default, Debug)]
 pub struct Env<'a> {
     parent: Option<&'a Env<'a>>,
@@ -89,7 +113,7 @@ pub fn eval(expr: Expr) {
                     }
                 }
             }
-            println!("Output: {:?}", eval_recursive(expr, &mut symbols));
+            println!("Output: {}", eval_recursive(expr, &mut symbols));
         }
     }
 }
@@ -112,9 +136,11 @@ pub fn eval_recursive(expr: &Expr, env: &mut Env) -> Expr {
                         )
                     }
                     "print" => {
+                        print!("PRINT: ");
                         for expr in &exprs[1..] {
-                            println!("PRINT: {:?}", eval_recursive(expr, env));
+                            print!("{} ", eval_recursive(expr, env));
                         }
+                        println!();
                         return Expr::List(vec![]);
                     }
                     "+" => {
@@ -158,7 +184,6 @@ pub fn eval_recursive(expr: &Expr, env: &mut Env) -> Expr {
                                     }
                                 }
                                 "else" => {
-                                    println!("GOT HERE");
                                     clause_index = Some(idx + 1);
                                     break;
                                 }
@@ -178,36 +203,36 @@ pub fn eval_recursive(expr: &Expr, env: &mut Env) -> Expr {
                         }
                         return last_evaluated;
                     }
-
-                    _ => match env.load(&exprs[0]) {
-                        Expr::List(fun) => {
-                            if let Expr::List(params) = &fun[0] {
-                                println!("Executing: {:?}", fun);
-
-                                let mut fnenv = Env {
-                                    parent: None,
-                                    ..Default::default()
-                                };
-                                assert!(
-                                    params.len() == exprs.len() - 1,
-                                    "Must have right number of args"
-                                );
-                                for (idx, param) in params.iter().enumerate() {
-                                    assert!(matches!(param, Expr::Symbol(_)));
-                                    let val = eval_recursive(&exprs[idx + 1], env);
-                                    fnenv.store(param.clone(), val);
+                    _ => {
+                        let expr = env.load(&exprs[0]);
+                        match &expr {
+                            Expr::List(fun) => {
+                                if let Expr::List(params) = &fun[0] {
+                                    let mut fnenv = Env {
+                                        parent: None,
+                                        ..Default::default()
+                                    };
+                                    assert!(
+                                        params.len() == exprs.len() - 1,
+                                        "Must have right number of args"
+                                    );
+                                    for (idx, param) in params.iter().enumerate() {
+                                        assert!(matches!(param, Expr::Symbol(_)));
+                                        let val = eval_recursive(&exprs[idx + 1], env);
+                                        fnenv.store(param.clone(), val);
+                                    }
+                                    let mut ret = Expr::List(vec![]);
+                                    fnenv.parent = Some(env);
+                                    for fnexpr in &fun[1..] {
+                                        ret = eval_recursive(fnexpr, &mut fnenv);
+                                    }
+                                    return ret;
                                 }
-                                let mut ret = Expr::List(vec![]);
-                                fnenv.parent = Some(env);
-                                for fnexpr in &fun[1..] {
-                                    ret = eval_recursive(fnexpr, &mut fnenv);
-                                }
-                                return ret;
                             }
+                            Expr::Number(val) => return expr,
+                            _ => panic!("How'd that get in the symbol table?"),
                         }
-                        Expr::Number(val) => return Expr::Number(val),
-                        _ => panic!("How'd that get in the symbol table?"),
-                    },
+                    }
                 }
             }
             panic!("Not sure whats going on")
@@ -267,16 +292,28 @@ pub fn eval(data: &[u8], types: &[Type]) -> i32 {
 }
 */
 
-pub fn parse_exp(tokens: &mut Tokenizer) -> Expr {
+pub fn parse_exp(tokens: &mut Tokenizer, brace: &str) -> Expr {
     let mut items: Vec<Expr> = vec![];
     while let Some(token) = tokens.next() {
         match token {
             "(" | "{" => {
-                let sub_expr = parse_exp(tokens);
-                assert!(!matches!(sub_expr, Expr::Parse(_)), "Uh oh");
+                let sub_expr = parse_exp(tokens, token);
+                assert!(
+                    !matches!(sub_expr, Expr::Parse(_)),
+                    "Got to the end of the file without closing all braces!"
+                );
                 items.push(sub_expr);
             }
             ")" | "}" => {
+                if brace == "(" {
+                    assert!(token == ")", "Mismatched brace!");
+                }
+                if brace == "{" {
+                    assert!(token == "}", "Mismatched brace!");
+                }
+                if brace == "" {
+                    panic!("Extra closing brace!")
+                }
                 return Expr::List(items);
             }
             s => {
@@ -501,8 +538,9 @@ mod tests {
 
         println!(
             "{:?}",
-            eval(parse_exp(&mut Tokenizer::new(
-                "{fn add (a b)
+            eval(parse_exp(
+                &mut Tokenizer::new(
+                    "{fn add (a b)
                      (+ a b)
                 }
                 {fn add_twice (a b) 
@@ -510,7 +548,7 @@ mod tests {
                     (add 
                         test
                         (+ a b))
-                }
+                    }
 
                 {fn pow (a b)
                     (print a b)
@@ -535,7 +573,9 @@ mod tests {
                 
                 threshold
                 "
-            )))
+                ),
+                ""
+            ))
         );
 
         //println!("{:?}", eval(&data, &types));
