@@ -83,14 +83,63 @@ pub fn eval(expr: Expr) {
         }
     }
 }
+
 pub fn eval_recursive<'a>(expr: &'a Expr, env: &Env) -> i32 {
     match expr {
         Expr::List(exprs) => {
             if let Expr::Symbol(name) = &exprs[0] {
                 match name.as_str() {
+                    "=" => {
+                        return (eval_recursive(&exprs[1], env) == eval_recursive(&exprs[2], env))
+                            as i32
+                    }
                     "+" => return eval_recursive(&exprs[1], env) + eval_recursive(&exprs[2], env),
                     "-" => return eval_recursive(&exprs[1], env) - eval_recursive(&exprs[2], env),
                     "*" => return eval_recursive(&exprs[1], env) * eval_recursive(&exprs[2], env),
+                    "if" => {
+                        let mut clause_index = None;
+                        let mut last_evaluated = 0;
+                        for (idx, name) in exprs.iter().enumerate().filter_map(|(idx, expr)| {
+                            if let Expr::Symbol(name) = expr {
+                                if name == "elseif" || name == "else" || name == "if" {
+                                    Some((idx, name))
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        }) {
+                            match name.as_str() {
+                                "if" | "elseif" => {
+                                    assert!(idx + 1 < exprs.len());
+                                    if eval_recursive(&exprs[idx + 1], env) != 0 {
+                                        clause_index = Some(idx + 2);
+                                        break;
+                                    }
+                                }
+                                "else" => {
+                                    println!("GOT HERE");
+                                    clause_index = Some(idx + 1);
+                                    break;
+                                }
+                                _ => unreachable!("Should never get here"),
+                            }
+                        }
+                        if let Some(idx) = clause_index {
+                            for expr in exprs[idx..].iter().take_while(|expr| {
+                                !if let Expr::Symbol(name) = expr {
+                                    name == "elseif" || name == "else"
+                                } else {
+                                    false
+                                }
+                            }) {
+                                last_evaluated = eval_recursive(expr, env);
+                            }
+                        }
+                        return last_evaluated;
+                    }
+
                     _ => match env.load(&exprs[0]) {
                         Expr::List(fun) => {
                             if let Expr::List(params) = &fun[0] {
@@ -426,9 +475,23 @@ mod tests {
         println!(
             "{:?}",
             eval(parse_exp(&mut Tokenizer::new(
-                "(fn add (a b) (+ a b))
-                (fn add_twice (a b) (add a (add a b)))
-                (add_twice 2 3)"
+                "{fn add (a b)
+                     (+ a b)
+                }
+                {fn add_twice (a b) 
+                    (add 
+                        a 
+                        (+ a b))
+                }
+
+                {if (= (add_twice 2 3) 4)
+                    11 
+                elseif (= (add_twice 2 3) 5)
+                    
+                    12 
+                else 
+                    2
+                }"
             )))
         );
 
