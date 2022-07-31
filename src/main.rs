@@ -28,7 +28,7 @@ impl<'a> Tokenizer<'a> {
 }
 
 pub fn is_brace(c: char) -> bool {
-    c == '(' || c == ')' || c == '{' || c == '}'
+    c == '(' || c == ')' || c == '{' || c == '}' || c == '[' || c == ']'
 }
 
 #[derive(Debug, Clone)]
@@ -51,7 +51,15 @@ impl Expr {
 impl fmt::Display for Expr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Expr::Parse(a) | Expr::List(a) => {
+            Expr::Parse(a) => {
+                for (idx, child) in a.iter().enumerate() {
+                    child.fmt(f).unwrap();
+                    if idx != a.len() - 1 {
+                        write!(f, " ").unwrap();
+                    }
+                }
+            }
+            Expr::List(a) => {
                 write!(f, "(").unwrap();
                 for (idx, child) in a.iter().enumerate() {
                     child.fmt(f).unwrap();
@@ -261,7 +269,7 @@ pub fn parse_exp(tokens: &mut Tokenizer, brace: &str) -> Expr {
     let mut items: Vec<Expr> = vec![];
     while let Some(token) = tokens.next() {
         match token {
-            "(" | "{" => {
+            "(" | "{" | "[" => {
                 let sub_expr = parse_exp(tokens, token);
                 assert!(
                     !matches!(sub_expr, Expr::Parse(_)),
@@ -269,12 +277,15 @@ pub fn parse_exp(tokens: &mut Tokenizer, brace: &str) -> Expr {
                 );
                 items.push(sub_expr);
             }
-            ")" | "}" => {
+            ")" | "}" | "]" => {
                 if brace == "(" {
                     assert!(token == ")", "Mismatched brace!");
                 }
                 if brace == "{" {
                     assert!(token == "}", "Mismatched brace!");
+                }
+                if brace == "[" {
+                    assert!(token == "]", "Mismatched brace!");
                 }
                 if brace == "" {
                     panic!("Extra closing brace!")
@@ -384,6 +395,7 @@ pub fn compile(expr: &Expr) {
         // end
 
         let mut symbols: CEnv = Default::default();
+        symbols.initialize_builtins();
 
         if let Expr::Parse(exprs) = expr {
             for expr in exprs {
@@ -419,7 +431,7 @@ pub fn compile(expr: &Expr) {
                     match &fdef[0] {
                         Expr::Symbol(name) => match name.as_str() {
                             "fn_extern" => (),
-                            _ => ret = compile_recursive(expr, &mut symbols, &llvm),
+                            _ => ret = compile_recursive(expr, &mut symbols, &llvm).val,
                         },
                         _ => (),
                     }
@@ -469,7 +481,11 @@ pub fn compile(expr: &Expr) {
         ]
         .as_ptr() as *mut _;
 
-        let puts_function = symbols.functions.get("puts").unwrap().val;
+        let puts_function = if let FunImpl::User(f) = symbols.functions.get("puts").unwrap().val {
+            f
+        } else {
+            panic!("Needs a real one")
+        };
 
         LLVMBuildCall(builder, puts_function, puts_function_args, 1, c_str!("i"));
         let fun = LLVMBuildRet(builder, LLVMConstInt(int_32_type, 0, 0));
@@ -488,16 +504,13 @@ pub fn compile(expr: &Expr) {
     }
 }
 
-#[derive(Default, Debug)]
-pub struct CEnv {
-    //parent: Option<&'a Env<'a>>,
-    functions: HashMap<String, CFun>,
-}
-
-#[derive(Debug)]
-pub struct CFun {
-    val: *mut LLVMValue,
-    _type: Expr,
+impl std::fmt::Debug for FunImpl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::User(arg0) => f.debug_tuple("User").finish(),
+            Self::Builtin(arg0) => f.debug_tuple("Builtin").finish(),
+        }
+    }
 }
 
 pub fn compile_fn_proto(expr: &Expr, env: &mut CEnv, llvm: &LL) -> *mut LLVMValue {
@@ -523,7 +536,7 @@ pub fn compile_fn_proto(expr: &Expr, env: &mut CEnv, llvm: &LL) -> *mut LLVMValu
             env.functions.insert(
                 name.clone(),
                 CFun {
-                    val: fun,
+                    val: FunImpl::User(fun),
                     _type: fntype,
                 },
             );
@@ -562,170 +575,147 @@ pub fn eval_type(expr: &Expr, env: &CEnv, llvm: &LL) -> *mut LLVMType {
             }
         }
         Expr::Symbol(name) => match name.as_str() {
-            "i32" => return unsafe { LLVMInt32TypeInContext(llvm.context) },
-            "u8" => return unsafe { LLVMInt8TypeInContext(llvm.context) },
+            ":i32" => return unsafe { LLVMInt32TypeInContext(llvm.context) },
+            ":u8" => return unsafe { LLVMInt8TypeInContext(llvm.context) },
             _ => panic!("Unknown type"),
         },
         _ => panic!("No other stuff in here yet."),
     }
     panic!("Nothing Matched type!")
 }
-pub fn compile_recursive(expr: &Expr, env: &mut CEnv, llvm: &LL) -> *mut LLVMValue {
+
+pub struct CVal {
+    val: *mut LLVMValue,
+    _type: Expr,
+}
+
+pub fn compile_recursive(expr: &Expr, env: &mut CEnv, llvm: &LL) -> CVal {
     match expr {
         Expr::List(exprs) => {
             if let Expr::Symbol(name) = &exprs[0] {
-                match name.as_str() {
-                    /*
-                    "set" => {
-                        let val = eval_recursive(&exprs[2], env);
-                        env.store(exprs[1].clone(), val);
-                        return Expr::List(vec![]);
-                    }
-                    "=" => {
-                        return Expr::Number(
-                            (eval_recursive(&exprs[1], env).num()
-                                == eval_recursive(&exprs[2], env).num())
-                                as i32,
-                        )
-                    }
-                    "eval" => {
-                        let mut subenv = Env {
-                            parent: Some(env),
-                            ..Default::default()
-                        };
-                        let mut ret = Expr::List(vec![]);
-                        for expr in exprs[1..].iter() {
-                            ret = eval_recursive(&eval_recursive(expr, &mut subenv), &mut subenv);
-                        }
-                        return ret;
-                    }
-                    "quote" => return Expr::List(exprs[1..].to_vec()),
-                    "print" => {
-                        print!("PRINT: ");
-                        for expr in &exprs[1..] {
-                            print!("{} ", eval_recursive(expr, env));
-                        }
-                        println!();
-                        return Expr::List(vec![]);
-                    }
-                    */
-                    "+" => {
-                        return unsafe {
-                            LLVMBuildAdd(
-                                llvm.builder,
-                                compile_recursive(&exprs[1], env, llvm),
-                                compile_recursive(&exprs[2], env, llvm),
-                                c_str!("addtmp"),
-                            )
-                        };
-                    }
-                    _ => panic!("Not yet"), /*
-                                            "-" => {
-                                                return Expr::Number(
-                                                    eval_recursive(&exprs[1], env).num()
-                                                        - eval_recursive(&exprs[2], env).num(),
-                                                )
-                                            }
-                                            "*" => {
-                                                return Expr::Number(
-                                                    eval_recursive(&exprs[1], env).num()
-                                                        * eval_recursive(&exprs[2], env).num(),
-                                                )
-                                            }
-                                            "if" => {
-                                                let mut clause_index = None;
-                                                let mut last_evaluated = Expr::Number(0);
-                                                for (idx, name) in exprs.iter().enumerate().filter_map(|(idx, expr)| {
-                                                    if let Expr::Symbol(name) = expr {
-                                                        if name == "elseif" || name == "else" || name == "if" {
-                                                            Some((idx, name))
-                                                        } else {
-                                                            None
-                                                        }
-                                                    } else {
-                                                        None
-                                                    }
-                                                }) {
-                                                    match name.as_str() {
-                                                        "if" | "elseif" => {
-                                                            assert!(idx + 1 < exprs.len());
-                                                            if eval_recursive(&exprs[idx + 1], env).num() != 0 {
-                                                                clause_index = Some(idx + 2);
-                                                                break;
-                                                            }
-                                                        }
-                                                        "else" => {
-                                                            clause_index = Some(idx + 1);
-                                                            break;
-                                                        }
-                                                        _ => unreachable!("Should never get here"),
-                                                    }
-                                                }
-                                                if let Some(idx) = clause_index {
-                                                    for expr in exprs[idx..].iter().take_while(|expr| {
-                                                        !if let Expr::Symbol(name) = expr {
-                                                            name == "elseif" || name == "else"
-                                                        } else {
-                                                            false
-                                                        }
-                                                    }) {
-                                                        last_evaluated = eval_recursive(expr, env);
-                                                    }
-                                                }
-                                                return last_evaluated;
-                                            }
-                                            _ => {
-                                                let expr = env.load(&exprs[0]);
-                                                match &expr {
-                                                    Expr::List(fun) => {
-                                                        if let Expr::List(params) = &fun[0] {
-                                                            let mut fnenv = Env {
-                                                                parent: None,
-                                                                ..Default::default()
-                                                            };
-                                                            assert!(
-                                                                params.len() == exprs.len() - 1,
-                                                                "Must have right number of args"
-                                                            );
-                                                            for (idx, param) in params.iter().enumerate() {
-                                                                assert!(matches!(param, Expr::Symbol(_)));
-                                                                let val = eval_recursive(&exprs[idx + 1], env);
-                                                                fnenv.store(param.clone(), val);
-                                                            }
-                                                            let mut ret = Expr::List(vec![]);
-                                                            fnenv.parent = Some(env);
-                                                            for fnexpr in &fun[1..] {
-                                                                ret = eval_recursive(fnexpr, &mut fnenv);
-                                                            }
-                                                            return ret;
-                                                        }
-                                                    }
-                                                    Expr::Number(val) => return expr,
-                                                    _ => panic!("How'd that get in the symbol table?"),
-                                                }
-                                            }
-                                            */
+                let args = &exprs[1..]
+                    .iter()
+                    .map(|expr| compile_recursive(expr, env, llvm))
+                    .collect::<Vec<_>>();
+                let params = Expr::List(
+                    args.iter()
+                        .map(|cval| cval._type.clone())
+                        .collect::<Vec<_>>(),
+                );
+                let values = args.iter().map(|cval| cval.val).collect::<Vec<_>>();
+                let fun = env.lookup_fn(name, &params);
+                if let Expr::List(types) = &fun._type {
+                    return CVal {
+                        val: match fun.val {
+                            FunImpl::User(val) => panic!("Not implemented"),
+                            FunImpl::Builtin(fun) => fun(&values, llvm),
+                        },
+                        _type: types[2].clone(),
+                    };
+                } else {
+                    panic!("Bad function in table");
                 }
             }
             panic!("Not sure whats going on")
         }
         Expr::Number(val) => unsafe {
-            LLVMConstInt(LLVMInt32TypeInContext(llvm.context), *val as u64, 0)
+            return CVal {
+                val: LLVMConstInt(LLVMInt32TypeInContext(llvm.context), *val as u64, 0),
+                _type: Expr::Symbol(":i32".to_string()),
+            };
         },
         Expr::Symbol(_) => panic!("not yet"), //env.load(expr),
         Expr::Parse(_) => panic!("Shouldn't get here"),
     }
 }
 
+#[derive(Default, Debug)]
+pub struct CEnv {
+    //parent: Option<&'a Env<'a>>,
+    functions: HashMap<String, CFun>,
+}
+
+#[derive(Debug)]
+pub struct CFun {
+    val: FunImpl,
+    _type: Expr,
+}
+
+pub enum FunImpl {
+    User(*mut LLVMValue),
+    Builtin(fn(&[*mut LLVMValue], &LL) -> *mut LLVMValue),
+}
+
+fn fullname(name: &str, params: &Expr) -> String {
+    let mut full_name = name.to_string();
+    full_name.push_str(&params.to_string());
+
+    full_name
+}
+
+impl CEnv {
+    pub fn initialize_builtins(&mut self) {
+        self.store_builtin("+", "(:fn  [:i32 :i32] :i32)", |exprs, llvm| unsafe {
+            LLVMBuildAdd(llvm.builder, exprs[0], exprs[1], c_str!("add"))
+        });
+
+        self.store_builtin("-", "(:fn  [:i32 :i32] :i32)", |exprs, llvm| unsafe {
+            LLVMBuildSub(llvm.builder, exprs[0], exprs[1], c_str!("add"))
+        });
+
+        self.store_builtin("*", "(:fn  [:i32 :i32] :i32)", |exprs, llvm| unsafe {
+            LLVMBuildMul(llvm.builder, exprs[0], exprs[1], c_str!("add"))
+        });
+
+        self.store_builtin("/", "(:fn  [:i32 :i32] :i32)", |exprs, llvm| unsafe {
+            LLVMBuildSDiv(llvm.builder, exprs[0], exprs[1], c_str!("add"))
+        });
+    }
+
+    pub fn lookup_fn(&self, name: &str, params: &Expr) -> &CFun {
+        let full_name = fullname(name, params);
+        self.functions.get(&full_name).unwrap()
+    }
+
+    pub fn store_builtin(
+        &mut self,
+        name: &str,
+        _type: &str,
+        fun: fn(&[*mut LLVMValue], &LL) -> *mut LLVMValue,
+    ) {
+        let _type = parse(_type);
+        if let Expr::List(exprs) = &_type {
+            let full_name = fullname(name, &exprs[1]);
+            self.functions.insert(
+                full_name,
+                CFun {
+                    val: FunImpl::Builtin(fun),
+                    _type,
+                },
+            );
+        } else {
+            panic!("Bad def: {} {}", name, _type);
+        }
+    }
+}
+
+pub fn parse(src: &str) -> Expr {
+    if let Expr::Parse(mut exprs) = parse_exp(&mut Tokenizer::new(src), "") {
+        return exprs.pop().unwrap();
+    }
+    panic!("No expressions!");
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
     fn test_llvm() {
+        println!("Test: {}", parse("[fn [i32 i32] i8]"));
         compile(&parse_exp(
             &mut Tokenizer::new(
                 "
-        {fn_extern puts (s {* u8}) i32}
-        (+ 1 (+ 48 3))",
+        {fn_extern puts (s [* :u8]) :i32}
+        (+ 1 (+ 48 (* 2 3)))",
             ),
             "",
         ));
@@ -736,6 +726,7 @@ mod tests {
 
     use crate::compile;
     use crate::eval;
+    use crate::parse;
     use crate::parse_exp;
     use crate::Tokenizer;
 
