@@ -1,7 +1,9 @@
 use std::{
     collections::{HashMap, VecDeque},
     fmt::{self, Display},
+    hash::BuildHasherDefault,
     iter::Peekable,
+    ptr,
     str::{from_utf8_unchecked, CharIndices},
 };
 
@@ -135,6 +137,18 @@ pub fn eval_recursive(expr: &Expr, env: &mut Env) -> Expr {
                                 as i32,
                         )
                     }
+                    "eval" => {
+                        let mut subenv = Env {
+                            parent: Some(env),
+                            ..Default::default()
+                        };
+                        let mut ret = Expr::List(vec![]);
+                        for expr in exprs[1..].iter() {
+                            ret = eval_recursive(&eval_recursive(expr, &mut subenv), &mut subenv);
+                        }
+                        return ret;
+                    }
+                    "quote" => return Expr::List(exprs[1..].to_vec()),
                     "print" => {
                         print!("PRINT: ");
                         for expr in &exprs[1..] {
@@ -243,55 +257,6 @@ pub fn eval_recursive(expr: &Expr, env: &mut Env) -> Expr {
     }
 }
 
-/*
-pub fn eval(data: &[u8], types: &[Type]) -> i32 {
-    let mut intermediates = vec![];
-    let mut offset = 0;
-    let mut evaluating: Vec<(usize, usize)> = vec![];
-
-    let symbols: HashMap<String, i32> = [("+".to_owned(), 0), ("-".to_owned(), 1)]
-        .into_iter()
-        .collect();
-
-    for (i, t) in types.iter().enumerate() {
-        if t.elements == 0 {
-            let s = unsafe { from_utf8_unchecked(&data[offset..offset + t.size]) };
-            offset += t.size;
-            if let Ok(num) = s.parse::<i32>() {
-                intermediates.push(num);
-            } else {
-                intermediates.push(symbols[s]);
-            }
-            evaluating.last_mut().unwrap().1 += 1;
-        } else {
-            evaluating.push((i, 0));
-        }
-        while let Some(ev) = evaluating.last() {
-            if types[ev.0].elements == ev.1 {
-                assert!(ev.1 == 3, "Wrong number of args for fn");
-                let args = (
-                    intermediates.pop().unwrap(),
-                    intermediates.pop().unwrap(),
-                    intermediates.pop().unwrap(),
-                );
-                intermediates.push(match args.2 {
-                    0 => args.1 + args.0,
-                    1 => args.1 - args.0,
-                    _ => panic!("Unknown op"),
-                });
-                evaluating.pop();
-                if let Some(parent) = evaluating.last_mut() {
-                    parent.1 += 1;
-                }
-            } else {
-                break;
-            }
-        }
-    }
-    intermediates.pop().unwrap()
-}
-*/
-
 pub fn parse_exp(tokens: &mut Tokenizer, brace: &str) -> Expr {
     let mut items: Vec<Expr> = vec![];
     while let Some(token) = tokens.next() {
@@ -327,155 +292,6 @@ pub fn parse_exp(tokens: &mut Tokenizer, brace: &str) -> Expr {
     }
     Expr::Parse(items)
 }
-
-/*
-pub fn parse(src: &str) -> Expr {
-    let mut tokens = Tokenizer::new(src);
-    let mut types = vec![];
-    let mut data = vec![];
-    let mut building_types: Vec<usize> = vec![];
-    for token in tokens.by_ref() {
-        match token {
-            "(" | "{" => {
-                building_types.push(types.len());
-                types.push(Type {
-                    kind: if token == "(" {
-                        Kind::Expr
-                    } else {
-                        Kind::Macro
-                    },
-                    size: 0,
-                    alignment: 1,
-                    elements: 0,
-                    total_elements: 0,
-                });
-            }
-            ")" | "}" => {
-                let finished_type_idx = building_types.pop().unwrap();
-
-                if let Some(bt) = building_types.last() {
-                    println!("FINALIZING");
-                    types[*bt].elements += 1;
-                    types[*bt].size += types[finished_type_idx].size;
-                    types[*bt].total_elements += types[finished_type_idx].total_elements + 1;
-                    types[*bt].alignment =
-                        types[*bt].alignment.max(types[finished_type_idx].alignment);
-                }
-                assert!(
-                    token
-                        == if types[finished_type_idx].kind == Kind::Expr {
-                            ")"
-                        } else {
-                            "}"
-                        },
-                    "Mismatched braces!"
-                );
-            }
-            s => {
-                if s.chars().next().unwrap().is_numeric() {}
-                let bytes = s.as_bytes();
-                data.extend(bytes);
-                let finished_type = Type {
-                    kind: Kind::Atom,
-                    elements: 0,
-                    total_elements: 0,
-                    size: bytes.len(),
-                    alignment: 1,
-                };
-                if let Some(bt) = building_types.last() {
-                    types[*bt].elements += 1;
-                    types[*bt].total_elements += 1;
-                    types[*bt].size += finished_type.size;
-                    types[*bt].alignment = types[*bt].alignment.max(finished_type.alignment);
-                }
-                types.push(finished_type);
-            }
-        }
-    }
-    assert!(building_types.is_empty());
-
-    let mut deferred: VecDeque<usize> = Default::default();
-
-    let mut offsets = vec![];
-    let mut max_visited = 0;
-    while max_visited < types.len() {
-        deferred.push_back(max_visited);
-
-        while let Some(cur_idx) = deferred.pop_front() {
-            {
-                let mut count = 0;
-                let mut offset = cur_idx + 1;
-                while count < types[cur_idx].elements {
-                    let child = &types[offset];
-                    offsets.push(offset);
-
-                    if child.kind != Kind::Atom {
-                        deferred.push_back(offset);
-                        offset += child.total_elements + 1;
-                    } else {
-                        offset += 1;
-                    }
-                    max_visited = max_visited.max(offset);
-                    count += 1;
-                }
-            }
-        }
-    }
-
-    /*
-    let mut child_counts: VecDeque<(usize, usize)> = Default::default();
-    let mut child_offsets = vec![];
-    let mut level = 0;
-    let mut cur_type = 0;
-    let type_it = types.iter().enumerate().skip(1);
-    child_counts.push_back((0, 0));
-    while !child_counts.is_empty() {
-        let (t_idx, t) = type_it.next().unwrap();
-        if t.kind != Kind::Atom {
-            child_counts.push_back((t_idx, 0));
-            level += 1;
-        } else {
-            let cur = child_counts.back_mut().unwrap();
-            cur.1 += 1;
-            if types[cur.0].elements == cur.1 {
-                level -= 1;
-            }
-        }
-
-        let (idx, count) = child_counts.front().unwrap();
-        if *count == types[*idx].elements {
-            child_counts.pop_front();
-        }
-        if child_count.last().unwrap() == types[*intermediate_offsets.front().unwrap()].elements {
-            intermediate_offsets.pop_front();
-            child_count = 0;
-        }
-        while let Some(ev) = evaluating.last() {
-            if types[ev.0].elements == ev.1 {
-                assert!(ev.1 == 3, "Wrong number of args for fn");
-                let args = (
-                    intermediates.pop().unwrap(),
-                    intermediates.pop().unwrap(),
-                    intermediates.pop().unwrap(),
-                );
-                intermediates.push(match args.2 {
-                    0 => args.1 + args.0,
-                    1 => args.1 - args.0,
-                    _ => panic!("Unknown op"),
-                });
-                evaluating.pop();
-                if let Some(parent) = evaluating.last_mut() {
-                    parent.1 += 1;
-                }
-            } else {
-                break;
-            }
-        }
-    }
-    */
-    (data, types, offsets)
-}
-*/
 
 impl<'a> Iterator for Tokenizer<'a> {
     type Item = &'a str;
@@ -519,11 +335,406 @@ impl<'a> Iterator for Tokenizer<'a> {
     }
 }
 
+macro_rules! c_str {
+    ($s:expr) => {
+        concat!($s, "\0").as_ptr() as *const i8
+    };
+}
+
+use llvm_sys::{
+    analysis::LLVMVerifyFunction, bit_writer::*, prelude::LLVMModuleRef, LLVMContext, LLVMModule,
+    LLVMType, LLVMValue,
+};
+use llvm_sys::{core::*, error_handling::LLVMEnablePrettyStackTrace};
+use llvm_sys::{prelude::LLVMBool, LLVMBuilder};
+
+pub struct LL {
+    builder: *mut LLVMBuilder,
+    module: *mut LLVMModule,
+    context: *mut LLVMContext,
+}
+
+pub fn compile(expr: &Expr) {
+    unsafe {
+        let context = LLVMContextCreate();
+        let module = LLVMModuleCreateWithNameInContext(c_str!("hello"), context);
+        let builder = LLVMCreateBuilderInContext(context);
+
+        let llvm = LL {
+            context,
+            module,
+            builder,
+        };
+
+        LLVMEnablePrettyStackTrace();
+
+        // types
+        let int_8_type = LLVMInt8TypeInContext(llvm.context);
+        let int_8_type_ptr = LLVMPointerType(int_8_type, 0);
+        let int_8_array_type = LLVMArrayType(int_8_type, 2);
+        let int_32_type = LLVMInt32TypeInContext(llvm.context);
+
+        let int_64_type = LLVMInt64TypeInContext(llvm.context);
+
+        // puts function
+        //let puts_function_args_type = [int_8_type_ptr].as_ptr() as *mut _;
+
+        //let puts_function_type = LLVMFunctionType(int_32_type, puts_function_args_type, 1, 0);
+        //let puts_function = //LLVMAddFunction(llvm.module, c_str!("puts"), puts_function_type);
+        // end
+
+        let mut symbols: CEnv = Default::default();
+
+        if let Expr::Parse(exprs) = expr {
+            for expr in exprs {
+                if let Expr::List(fdef) = expr {
+                    match &fdef[0] {
+                        Expr::Symbol(name) => match name.as_str() {
+                            "fn_extern" => {
+                                compile_fn_proto(expr, &mut symbols, &llvm);
+                            }
+                            _ => (),
+                        },
+                        _ => (),
+                    }
+                }
+            }
+        }
+
+        // main function
+        let main_function_type = LLVMFunctionType(int_32_type, ptr::null_mut(), 0, 0);
+        let main_function = LLVMAddFunction(module, c_str!("main"), main_function_type);
+
+        let entry = LLVMAppendBasicBlockInContext(context, main_function, c_str!("entry"));
+
+        LLVMPositionBuilderAtEnd(builder, entry);
+
+        let alo = LLVMBuildAlloca(builder, int_8_array_type, c_str!("summed"));
+
+        let mut ret: *mut LLVMValue = std::ptr::null_mut();
+
+        if let Expr::Parse(exprs) = expr {
+            for expr in exprs {
+                if let Expr::List(fdef) = expr {
+                    match &fdef[0] {
+                        Expr::Symbol(name) => match name.as_str() {
+                            "fn_extern" => (),
+                            _ => ret = compile_recursive(expr, &mut symbols, &llvm),
+                        },
+                        _ => (),
+                    }
+                }
+            }
+        }
+        let summed = ret;
+
+        let small = LLVMBuildIntCast(builder, summed, int_8_type, c_str!("lil"));
+
+        let zoffi64 = LLVMConstInt(int_64_type, 0, 0);
+        let zoffi32 = LLVMConstInt(int_32_type, 0, 0);
+        let ptrargs = [zoffi64, zoffi32];
+
+        let numaddr = LLVMBuildGEP2(
+            builder,
+            int_8_array_type,
+            alo,
+            ptrargs.as_ptr() as *mut _,
+            2,
+            c_str!("null"),
+        );
+
+        LLVMBuildStore(builder, small, numaddr);
+
+        let ooffi32 = LLVMConstInt(int_32_type, 1, 0);
+        let ptrargs1 = [zoffi64, ooffi32];
+
+        let endaddr = LLVMBuildGEP2(
+            builder,
+            int_8_array_type,
+            alo,
+            ptrargs1.as_ptr() as *mut _,
+            2,
+            c_str!("null"),
+        );
+
+        LLVMBuildStore(builder, LLVMConstInt(int_8_type, 0, 0), endaddr);
+
+        let puts_function_args = [
+            //LLVMBuildPointerCast(
+            //builder, // cast [14 x i8] type to int8 pointer
+            numaddr, // build hello string constant
+                    //int_8_type_ptr,
+                    //c_str!("0"),
+                    //)
+        ]
+        .as_ptr() as *mut _;
+
+        let puts_function = symbols.functions.get("puts").unwrap().val;
+
+        LLVMBuildCall(builder, puts_function, puts_function_args, 1, c_str!("i"));
+        let fun = LLVMBuildRet(builder, LLVMConstInt(int_32_type, 0, 0));
+        // end
+        LLVMVerifyFunction(
+            main_function,
+            llvm_sys::analysis::LLVMVerifierFailureAction::LLVMAbortProcessAction,
+        );
+        //LLVMDumpModule(module); // dump module to STDOUT
+        LLVMPrintModuleToFile(module, c_str!("hello.ll"), ptr::null_mut());
+
+        // clean memory
+        LLVMDisposeBuilder(builder);
+        LLVMDisposeModule(module);
+        LLVMContextDispose(context);
+    }
+}
+
+#[derive(Default, Debug)]
+pub struct CEnv {
+    //parent: Option<&'a Env<'a>>,
+    functions: HashMap<String, CFun>,
+}
+
+#[derive(Debug)]
+pub struct CFun {
+    val: *mut LLVMValue,
+    _type: Expr,
+}
+
+pub fn compile_fn_proto(expr: &Expr, env: &mut CEnv, llvm: &LL) -> *mut LLVMValue {
+    if let Expr::List(exprs) = expr {
+        if let [Expr::Symbol(_fntype), Expr::Symbol(name), Expr::List(params), ret] = &exprs[..] {
+            let fntype = Expr::List(vec![
+                Expr::Symbol("fn".to_string()),
+                Expr::List(
+                    params
+                        .iter()
+                        .skip(1)
+                        .step_by(2)
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                ),
+                ret.clone(),
+            ]);
+
+            let ft = eval_type(&fntype, env, llvm);
+            let mut cname = name.clone().into_bytes();
+            cname.push(0);
+            let fun = unsafe { LLVMAddFunction(llvm.module, cname.as_ptr() as *const i8, ft) };
+            env.functions.insert(
+                name.clone(),
+                CFun {
+                    val: fun,
+                    _type: fntype,
+                },
+            );
+
+            return fun;
+        }
+    }
+    panic!("Not a function!")
+}
+
+pub fn eval_type(expr: &Expr, env: &CEnv, llvm: &LL) -> *mut LLVMType {
+    match expr {
+        Expr::List(exprs) => {
+            if exprs.is_empty() {
+                return unsafe { LLVMVoidType() };
+            }
+            if let Expr::Symbol(name) = &exprs[0] {
+                match name.as_str() {
+                    "*" => return unsafe { LLVMPointerType(eval_type(&exprs[1], env, llvm), 0) },
+                    "fn" => {
+                        if let Expr::List(params) = &exprs[1] {
+                            let pt = params
+                                .iter()
+                                .map(|p| eval_type(p, env, llvm))
+                                .collect::<Vec<_>>();
+                            let rt = eval_type(&exprs[2], env, llvm);
+
+                            return unsafe {
+                                LLVMFunctionType(rt, pt.as_ptr() as *mut _, pt.len() as u32, 0)
+                            };
+                        }
+                    }
+
+                    _ => panic!("Unknown type fn"),
+                }
+            }
+        }
+        Expr::Symbol(name) => match name.as_str() {
+            "i32" => return unsafe { LLVMInt32TypeInContext(llvm.context) },
+            "u8" => return unsafe { LLVMInt8TypeInContext(llvm.context) },
+            _ => panic!("Unknown type"),
+        },
+        _ => panic!("No other stuff in here yet."),
+    }
+    panic!("Nothing Matched type!")
+}
+pub fn compile_recursive(expr: &Expr, env: &mut CEnv, llvm: &LL) -> *mut LLVMValue {
+    match expr {
+        Expr::List(exprs) => {
+            if let Expr::Symbol(name) = &exprs[0] {
+                match name.as_str() {
+                    /*
+                    "set" => {
+                        let val = eval_recursive(&exprs[2], env);
+                        env.store(exprs[1].clone(), val);
+                        return Expr::List(vec![]);
+                    }
+                    "=" => {
+                        return Expr::Number(
+                            (eval_recursive(&exprs[1], env).num()
+                                == eval_recursive(&exprs[2], env).num())
+                                as i32,
+                        )
+                    }
+                    "eval" => {
+                        let mut subenv = Env {
+                            parent: Some(env),
+                            ..Default::default()
+                        };
+                        let mut ret = Expr::List(vec![]);
+                        for expr in exprs[1..].iter() {
+                            ret = eval_recursive(&eval_recursive(expr, &mut subenv), &mut subenv);
+                        }
+                        return ret;
+                    }
+                    "quote" => return Expr::List(exprs[1..].to_vec()),
+                    "print" => {
+                        print!("PRINT: ");
+                        for expr in &exprs[1..] {
+                            print!("{} ", eval_recursive(expr, env));
+                        }
+                        println!();
+                        return Expr::List(vec![]);
+                    }
+                    */
+                    "+" => {
+                        return unsafe {
+                            LLVMBuildAdd(
+                                llvm.builder,
+                                compile_recursive(&exprs[1], env, llvm),
+                                compile_recursive(&exprs[2], env, llvm),
+                                c_str!("addtmp"),
+                            )
+                        };
+                    }
+                    _ => panic!("Not yet"), /*
+                                            "-" => {
+                                                return Expr::Number(
+                                                    eval_recursive(&exprs[1], env).num()
+                                                        - eval_recursive(&exprs[2], env).num(),
+                                                )
+                                            }
+                                            "*" => {
+                                                return Expr::Number(
+                                                    eval_recursive(&exprs[1], env).num()
+                                                        * eval_recursive(&exprs[2], env).num(),
+                                                )
+                                            }
+                                            "if" => {
+                                                let mut clause_index = None;
+                                                let mut last_evaluated = Expr::Number(0);
+                                                for (idx, name) in exprs.iter().enumerate().filter_map(|(idx, expr)| {
+                                                    if let Expr::Symbol(name) = expr {
+                                                        if name == "elseif" || name == "else" || name == "if" {
+                                                            Some((idx, name))
+                                                        } else {
+                                                            None
+                                                        }
+                                                    } else {
+                                                        None
+                                                    }
+                                                }) {
+                                                    match name.as_str() {
+                                                        "if" | "elseif" => {
+                                                            assert!(idx + 1 < exprs.len());
+                                                            if eval_recursive(&exprs[idx + 1], env).num() != 0 {
+                                                                clause_index = Some(idx + 2);
+                                                                break;
+                                                            }
+                                                        }
+                                                        "else" => {
+                                                            clause_index = Some(idx + 1);
+                                                            break;
+                                                        }
+                                                        _ => unreachable!("Should never get here"),
+                                                    }
+                                                }
+                                                if let Some(idx) = clause_index {
+                                                    for expr in exprs[idx..].iter().take_while(|expr| {
+                                                        !if let Expr::Symbol(name) = expr {
+                                                            name == "elseif" || name == "else"
+                                                        } else {
+                                                            false
+                                                        }
+                                                    }) {
+                                                        last_evaluated = eval_recursive(expr, env);
+                                                    }
+                                                }
+                                                return last_evaluated;
+                                            }
+                                            _ => {
+                                                let expr = env.load(&exprs[0]);
+                                                match &expr {
+                                                    Expr::List(fun) => {
+                                                        if let Expr::List(params) = &fun[0] {
+                                                            let mut fnenv = Env {
+                                                                parent: None,
+                                                                ..Default::default()
+                                                            };
+                                                            assert!(
+                                                                params.len() == exprs.len() - 1,
+                                                                "Must have right number of args"
+                                                            );
+                                                            for (idx, param) in params.iter().enumerate() {
+                                                                assert!(matches!(param, Expr::Symbol(_)));
+                                                                let val = eval_recursive(&exprs[idx + 1], env);
+                                                                fnenv.store(param.clone(), val);
+                                                            }
+                                                            let mut ret = Expr::List(vec![]);
+                                                            fnenv.parent = Some(env);
+                                                            for fnexpr in &fun[1..] {
+                                                                ret = eval_recursive(fnexpr, &mut fnenv);
+                                                            }
+                                                            return ret;
+                                                        }
+                                                    }
+                                                    Expr::Number(val) => return expr,
+                                                    _ => panic!("How'd that get in the symbol table?"),
+                                                }
+                                            }
+                                            */
+                }
+            }
+            panic!("Not sure whats going on")
+        }
+        Expr::Number(val) => unsafe {
+            LLVMConstInt(LLVMInt32TypeInContext(llvm.context), *val as u64, 0)
+        },
+        Expr::Symbol(_) => panic!("not yet"), //env.load(expr),
+        Expr::Parse(_) => panic!("Shouldn't get here"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_llvm() {
+        compile(&parse_exp(
+            &mut Tokenizer::new(
+                "
+        {fn_extern puts (s {* u8}) i32}
+        (+ 1 (+ 48 3))",
+            ),
+            "",
+        ));
+    }
+
     use std::ptr;
     use std::str::from_utf8;
 
+    use crate::compile;
     use crate::eval;
     use crate::parse_exp;
     use crate::Tokenizer;
@@ -561,6 +772,8 @@ mod tests {
 
                 (pow 2 5)
 
+                (eval (quote + 1 100))
+
                 {set threshold 48}
                 {if (= (add_twice 2 3) threshold)
                     11 
@@ -579,63 +792,5 @@ mod tests {
         );
 
         //println!("{:?}", eval(&data, &types));
-    }
-
-    macro_rules! c_str {
-        ($s:expr) => {
-            concat!($s, "\0").as_ptr() as *const i8
-        };
-    }
-
-    use llvm_sys::bit_writer::*;
-    use llvm_sys::core::*;
-    use llvm_sys::prelude::LLVMBool;
-
-    #[test]
-    fn test_llvm() {
-        unsafe {
-            let context = LLVMContextCreate();
-            let module = LLVMModuleCreateWithNameInContext(c_str!("hello"), context);
-            let builder = LLVMCreateBuilderInContext(context);
-
-            // types
-            let int_8_type = LLVMInt8TypeInContext(context);
-            let int_8_type_ptr = LLVMPointerType(int_8_type, 0);
-            let int_32_type = LLVMInt32TypeInContext(context);
-
-            // puts function
-            let puts_function_args_type = [int_8_type_ptr].as_ptr() as *mut _;
-
-            let puts_function_type = LLVMFunctionType(int_32_type, puts_function_args_type, 1, 0);
-            let puts_function = LLVMAddFunction(module, c_str!("puts"), puts_function_type);
-            // end
-
-            // main function
-            let main_function_type = LLVMFunctionType(int_32_type, ptr::null_mut(), 0, 0);
-            let main_function = LLVMAddFunction(module, c_str!("main"), main_function_type);
-
-            let entry = LLVMAppendBasicBlockInContext(context, main_function, c_str!("entry"));
-            LLVMPositionBuilderAtEnd(builder, entry);
-
-            let puts_function_args = [LLVMBuildPointerCast(
-                builder, // cast [14 x i8] type to int8 pointer
-                LLVMBuildGlobalString(builder, c_str!("Hello, World!"), c_str!("hello")), // build hello string constant
-                int_8_type_ptr,
-                c_str!("0"),
-            )]
-            .as_ptr() as *mut _;
-
-            LLVMBuildCall(builder, puts_function, puts_function_args, 1, c_str!("i"));
-            LLVMBuildRet(builder, LLVMConstInt(int_32_type, 0, 0));
-            // end
-
-            //LLVMDumpModule(module); // dump module to STDOUT
-            LLVMPrintModuleToFile(module, c_str!("hello.ll"), ptr::null_mut());
-
-            // clean memory
-            LLVMDisposeBuilder(builder);
-            LLVMDisposeModule(module);
-            LLVMContextDispose(context);
-        }
     }
 }
