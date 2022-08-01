@@ -353,8 +353,8 @@ macro_rules! c_str {
 }
 
 use llvm_sys::{
-    analysis::LLVMVerifyFunction, bit_writer::*, prelude::LLVMModuleRef, LLVMContext, LLVMModule,
-    LLVMType, LLVMValue,
+    analysis::LLVMVerifyFunction, bit_writer::*, orc2::LLVMOrcSymbolPredicate,
+    prelude::LLVMModuleRef, LLVMContext, LLVMModule, LLVMType, LLVMValue,
 };
 use llvm_sys::{core::*, error_handling::LLVMEnablePrettyStackTrace};
 use llvm_sys::{prelude::LLVMBool, LLVMBuilder};
@@ -368,6 +368,7 @@ pub struct LL {
 pub fn compile(expr: &Expr) {
     unsafe {
         let context = LLVMContextCreate();
+
         let module = LLVMModuleCreateWithNameInContext(c_str!("hello"), context);
         let builder = LLVMCreateBuilderInContext(context);
 
@@ -421,8 +422,6 @@ pub fn compile(expr: &Expr) {
 
         LLVMPositionBuilderAtEnd(builder, entry);
 
-        let alo = LLVMBuildAlloca(builder, int_8_array_type, c_str!("summed"));
-
         let mut ret = None;
 
         if let Expr::Parse(exprs) = expr {
@@ -450,30 +449,19 @@ pub fn compile(expr: &Expr) {
         let zoffi32 = LLVMConstInt(int_32_type, 0, 0);
         let ptrargs = [zoffi64, zoffi32];
 
+        let B = symbols.load_var("B");
+        let strt = eval_type(&B._type, &symbols, &llvm);
+
         let numaddr = LLVMBuildGEP2(
             builder,
-            int_8_array_type,
-            alo,
+            strt,
+            B.val,
             ptrargs.as_ptr() as *mut _,
             2,
             c_str!("null"),
         );
 
         LLVMBuildStore(builder, small, numaddr);
-
-        let ooffi32 = LLVMConstInt(int_32_type, 1, 0);
-        let ptrargs1 = [zoffi64, ooffi32];
-
-        let endaddr = LLVMBuildGEP2(
-            builder,
-            int_8_array_type,
-            alo,
-            ptrargs1.as_ptr() as *mut _,
-            2,
-            c_str!("null"),
-        );
-
-        LLVMBuildStore(builder, LLVMConstInt(int_8_type, 0, 0), endaddr);
 
         let puts_function_args = [
             //LLVMBuildPointerCast(
@@ -586,6 +574,19 @@ pub fn eval_type(expr: &Expr, env: &CEnv, llvm: &LL) -> *mut LLVMType {
                             };
                         }
                     }
+                    ":array" => {
+                        let _type = eval_type(&exprs[1], env, llvm);
+                        return unsafe {
+                            LLVMArrayType(
+                                _type,
+                                if let Expr::Number(n) = &exprs[2] {
+                                    *n as u32
+                                } else {
+                                    panic!("Array must have size!")
+                                },
+                            )
+                        };
+                    }
 
                     other => panic!("Unknown type fn {}", other),
                 }
@@ -625,6 +626,44 @@ pub fn compile_recursive(expr: &Expr, env: &mut CEnv, llvm: &LL) -> Option<CVal>
                             },
                         );
                         return None;
+                    }
+                    "array" => {
+                        let cvals = exprs[1..]
+                            .iter()
+                            .map(|expr| compile_recursive(expr, env, llvm).unwrap())
+                            .collect::<Vec<_>>();
+                        let vals = cvals.iter().map(|cval| cval.val).collect::<Vec<_>>();
+                        return Some(CVal {
+                            _type: Expr::List(vec![
+                                Expr::Symbol(":array".to_string()),
+                                cvals[0]._type.clone(),
+                                Expr::Number(cvals.len() as i32),
+                            ]),
+                            val: unsafe {
+                                LLVMConstArray(
+                                    eval_type(&cvals[0]._type, env, llvm),
+                                    vals.as_ptr() as *mut _,
+                                    vals.len() as u32,
+                                )
+                            },
+                        });
+                    }
+                    "cast" => {
+                        // todo this could be just the first symbol as the actual type
+                        let cval = compile_recursive(&exprs[1], env, llvm).unwrap();
+                        let _dest_type = eval_type(&exprs[2], env, llvm);
+                        return Some(CVal {
+                            _type: exprs[2].clone(),
+                            val: unsafe {
+                                LLVMBuildIntCast2(
+                                    llvm.builder,
+                                    cval.val,
+                                    _dest_type,
+                                    0,
+                                    c_str!("cast"),
+                                )
+                            },
+                        });
                     }
                     _ => (),
                 }
@@ -784,6 +823,7 @@ mod tests {
             &mut Tokenizer::new(
                 "
         {fn_extern puts (s [* :u8]) :i32}
+        (var B (array (cast 48 :u8) 49 50 0))
         (var A 2)
         (+ A (+ 48 (* 2 3)))",
             ),
