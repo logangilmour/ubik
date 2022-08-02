@@ -1,4 +1,5 @@
 use std::{
+    any::Any,
     collections::{HashMap, VecDeque},
     fmt::{self, Display},
     hash::BuildHasherDefault,
@@ -450,7 +451,15 @@ pub fn compile(expr: &Expr) {
         let ptrargs = [zoffi64, zoffi32];
 
         let B = symbols.load_var("B");
-        let strt = eval_type(&B._type, &symbols, &llvm);
+
+        let subtype = if let Expr::List(exprs) = &B._type {
+            &exprs[1]
+        } else {
+            panic!("Wher is it")
+        };
+        let strt = eval_type(subtype, &symbols, &llvm);
+
+        println!("GET ADDRESS");
 
         let numaddr = LLVMBuildGEP2(
             builder,
@@ -461,7 +470,11 @@ pub fn compile(expr: &Expr) {
             c_str!("null"),
         );
 
+        println!("STORE");
+
         LLVMBuildStore(builder, small, numaddr);
+
+        println!("GOT HERE");
 
         let puts_function_args = [
             //LLVMBuildPointerCast(
@@ -565,7 +578,7 @@ pub fn eval_type(expr: &Expr, env: &CEnv, llvm: &LL) -> *mut LLVMType {
                         if let Expr::List(params) = &exprs[1] {
                             let pt = params
                                 .iter()
-                                .map(|p| eval_type(p, env, llvm))
+                                .map(|p| unsafe { LLVMPointerType(eval_type(p, env, llvm), 0) })
                                 .collect::<Vec<_>>();
                             let rt = eval_type(&exprs[2], env, llvm);
 
@@ -622,7 +635,10 @@ pub fn compile_recursive(expr: &Expr, env: &mut CEnv, llvm: &LL) -> Option<CVal>
                             sym,
                             CVal {
                                 val: loc,
-                                _type: assigned._type.clone(),
+                                _type: Expr::List(vec![
+                                    Expr::Symbol("*".to_string()),
+                                    assigned._type.clone(),
+                                ]),
                             },
                         );
                         return None;
@@ -668,19 +684,38 @@ pub fn compile_recursive(expr: &Expr, env: &mut CEnv, llvm: &LL) -> Option<CVal>
                     _ => (),
                 }
 
-                let args = &exprs[1..]
+                let mut args = exprs[1..]
                     .iter()
-                    .map(|expr| compile_recursive(expr, env, llvm))
+                    .map(|expr| compile_recursive(expr, env, llvm).unwrap())
                     .collect::<Vec<_>>();
+
+                for mut cval in &mut args {
+                    if let Expr::List(exprs) = &cval._type {
+                        if let Expr::Symbol(name) = &exprs[0] {
+                            if name.as_str() == "*" {
+                                cval._type = exprs[1].clone();
+                                continue;
+                            }
+                        }
+                    }
+                    let loc = unsafe {
+                        LLVMBuildAlloca(
+                            llvm.builder,
+                            eval_type(&cval._type, env, llvm),
+                            c_str!("alloca"),
+                        )
+                    };
+                    unsafe { LLVMBuildStore(llvm.builder, cval.val, loc) };
+
+                    cval.val = loc;
+                }
+
                 let params = Expr::List(
                     args.iter()
-                        .map(|cval| cval.as_ref().unwrap()._type.clone())
+                        .map(|cval| cval._type.clone())
                         .collect::<Vec<_>>(),
                 );
-                let values = args
-                    .iter()
-                    .map(|cval| cval.as_ref().unwrap().val)
-                    .collect::<Vec<_>>();
+
                 let fun = env.lookup_fn(name, &params);
                 let funtype = if let Expr::List(exprs) = &fun._type {
                     exprs[2].clone()
@@ -689,13 +724,31 @@ pub fn compile_recursive(expr: &Expr, env: &mut CEnv, llvm: &LL) -> Option<CVal>
                 };
 
                 if let FunImpl::Builtin(fun) = fun.val {
+                    let values = args
+                        .iter()
+                        .map(|cval| (cval.val, eval_type(&cval._type, env, llvm)))
+                        .collect::<Vec<_>>();
                     return Some(CVal {
                         val: fun(&values, llvm, env),
                         _type: funtype,
                     });
-                } else {
-                    panic!("oh no")
-                };
+                } else if let FunImpl::User(fun) = fun.val {
+                    let values = args.iter().map(|cval| cval.val).collect::<Vec<_>>();
+
+                    return Some(CVal {
+                        val: unsafe {
+                            LLVMBuildCall2(
+                                llvm.builder,
+                                eval_type(&funtype, env, llvm),
+                                fun,
+                                values.as_ptr() as *mut _,
+                                1,
+                                c_str!("i"),
+                            )
+                        },
+                        _type: funtype,
+                    });
+                }
             }
             panic!("Not sure whats going on")
         }
@@ -705,20 +758,7 @@ pub fn compile_recursive(expr: &Expr, env: &mut CEnv, llvm: &LL) -> Option<CVal>
                 _type: Expr::Symbol(":i32".to_string()),
             });
         },
-        Expr::Symbol(name) => {
-            let var = env.load_var(name);
-            return Some(CVal {
-                val: unsafe {
-                    LLVMBuildLoad2(
-                        llvm.builder,
-                        eval_type(&var._type, env, llvm),
-                        var.val,
-                        c_str!("load"),
-                    )
-                },
-                _type: var._type.clone(),
-            });
-        }
+        Expr::Symbol(name) => return Some(env.load_var(name).clone()),
         Expr::Parse(_) => panic!("Shouldn't get here"),
     }
 }
@@ -742,7 +782,7 @@ pub struct CFun {
     _type: Expr,
 }
 
-type Op = fn(&[*mut LLVMValue], &LL, &mut CEnv) -> *mut LLVMValue;
+type Op = fn(&[(*mut LLVMValue, *mut LLVMType)], &LL, &mut CEnv) -> *mut LLVMValue;
 
 pub enum FunImpl {
     User(*mut LLVMValue),
@@ -759,19 +799,39 @@ fn fullname(name: &str, params: &Expr) -> String {
 impl CEnv {
     pub fn initialize_builtins(&mut self) {
         self.store_builtin("+", "(:fn  [:i32 :i32] :i32)", |exprs, llvm, env| unsafe {
-            LLVMBuildAdd(llvm.builder, exprs[0], exprs[1], c_str!("add"))
+            LLVMBuildAdd(
+                llvm.builder,
+                LLVMBuildLoad2(llvm.builder, exprs[0].1, exprs[0].0, c_str!("r")),
+                LLVMBuildLoad2(llvm.builder, exprs[1].1, exprs[1].0, c_str!("l")),
+                c_str!("add"),
+            )
         });
 
         self.store_builtin("-", "(:fn  [:i32 :i32] :i32)", |exprs, llvm, env| unsafe {
-            LLVMBuildSub(llvm.builder, exprs[0], exprs[1], c_str!("add"))
+            LLVMBuildSub(
+                llvm.builder,
+                LLVMBuildLoad2(llvm.builder, exprs[0].1, exprs[0].0, c_str!("r")),
+                LLVMBuildLoad2(llvm.builder, exprs[1].1, exprs[1].0, c_str!("l")),
+                c_str!("sub"),
+            )
         });
 
         self.store_builtin("*", "(:fn  [:i32 :i32] :i32)", |exprs, llvm, env| unsafe {
-            LLVMBuildMul(llvm.builder, exprs[0], exprs[1], c_str!("add"))
+            LLVMBuildMul(
+                llvm.builder,
+                LLVMBuildLoad2(llvm.builder, exprs[0].1, exprs[0].0, c_str!("r")),
+                LLVMBuildLoad2(llvm.builder, exprs[1].1, exprs[1].0, c_str!("l")),
+                c_str!("mul"),
+            )
         });
 
         self.store_builtin("/", "(:fn  [:i32 :i32] :i32)", |exprs, llvm, env| unsafe {
-            LLVMBuildSDiv(llvm.builder, exprs[0], exprs[1], c_str!("add"))
+            LLVMBuildSDiv(
+                llvm.builder,
+                LLVMBuildLoad2(llvm.builder, exprs[0].1, exprs[0].0, c_str!("r")),
+                LLVMBuildLoad2(llvm.builder, exprs[1].1, exprs[1].0, c_str!("l")),
+                c_str!("sdiv"),
+            )
         });
     }
 
@@ -822,9 +882,9 @@ mod tests {
         compile(&parse_exp(
             &mut Tokenizer::new(
                 "
-        {fn_extern puts (s [* :u8]) :i32}
+        {fn_extern puts (s :u8) :i32}
         (var B (array (cast 48 :u8) 49 50 0))
-        (var A 2)
+        (var A 3)
         (+ A (+ 48 (* 2 3)))",
             ),
             "",
